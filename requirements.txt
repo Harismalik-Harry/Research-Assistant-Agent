@@ -1,0 +1,9 @@
+langchain
+langgraph
+langchain-core
+langchain-community
+langchain-google-genai
+pydantic
+typing-extensions
+tavily-python
+wikipedia
