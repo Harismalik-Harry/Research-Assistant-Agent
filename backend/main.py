@@ -1,3 +1,4 @@
+import os
 import operator
 from pydantic import BaseModel, Field
 from typing import Annotated, List
@@ -10,186 +11,108 @@ from langchain_core.messages import (
     SystemMessage,
     get_buffer_string,
 )
-
 from langgraph.constants import Send
 from langgraph.graph import END, MessagesState, START, StateGraph
 from schemas import *
 from states import *
 from prompts import *
 from langchain_google_genai import  ChatGoogleGenerativeAI
-llm=ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.5)
+
+llm = ChatGoogleGenerativeAI(
+    model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+    temperature=0.5
+)
 def create_analysts(state: GenerateAnalystsState):
     """Create analysts"""
-
     topic = state["topic"]
     max_analysts = state["max_analysts"]
     human_analyst_feedback = state.get("human_analyst_feedback", "")
-
-    # Enforce structured output
     structured_llm = llm.with_structured_output(Perspectives)
-
-    # System message
     system_message = analyst_instructions.format(
         topic=topic,
         human_analyst_feedback=human_analyst_feedback,
         max_analysts=max_analysts,
     )
-
-    # Generate question
     analysts = structured_llm.invoke(
         [SystemMessage(content=system_message)]
         + [HumanMessage(content="Generate the set of analysts.")]
     )
-
-    # Write the list of analysis to state
     return {"analysts": analysts.analysts}
-
-
 def human_feedback(state: GenerateAnalystsState):
     """No-op node that should be interrupted on"""
     pass
-
 def generate_question(state: InterviewState):
     """Node to generate a question"""
-
-    # Get state
     analyst = state["analyst"]
     messages = state["messages"]
-
-    # Generate question
     system_message = question_instructions.format(goals=analyst.persona)
     question = llm.invoke([SystemMessage(content=system_message)] + messages)
-
-    # Write messages to state
     return {"messages": [question]}
-
 def search_web(state: InterviewState):
     """Retrieve docs from web search"""
-
-    # Search
     tavily_search = TavilySearchResults(max_results=3)
-
-    # Search query
     structured_llm = llm.with_structured_output(SearchQuery)
     search_query = structured_llm.invoke([search_instructions] + state["messages"])
-
-    # Search
     search_docs = tavily_search.invoke(search_query.search_query)
-
-    # Format
     formatted_search_docs = "\n\n---\n\n".join(
         [
             f'<Document href="{doc["url"]}"/>\n{doc["content"]}\n</Document>'
             for doc in search_docs
         ]
     )
-
     return {"context": [formatted_search_docs]}
 def search_wikipedia(state: InterviewState):
     """Retrieve docs from wikipedia"""
-
-    # Search query
     structured_llm = llm.with_structured_output(SearchQuery)
     search_query = structured_llm.invoke([search_instructions] + state["messages"])
-
-    # Search
     search_docs = WikipediaLoader(
         query=search_query.search_query, load_max_docs=2
     ).load()
-
-    # Format
     formatted_search_docs = "\n\n---\n\n".join(
         [
             f'<Document source="{doc.metadata["source"]}" page="{doc.metadata.get("page", "")}"/>\n{doc.page_content}\n</Document>'
             for doc in search_docs
         ]
     )
-
     return {"context": [formatted_search_docs]}
-
-
-# Generate expert answer
-
-
-
 def generate_answer(state: InterviewState):
     """Node to answer a question"""
-
-    # Get state
     analyst = state["analyst"]
     messages = state["messages"]
     context = state["context"]
-
-    # Answer question
     system_message = answer_instructions.format(goals=analyst.persona, context=context)
     answer = llm.invoke([SystemMessage(content=system_message)] + messages)
-
-    # Name the message as coming from the expert
     answer.name = "expert"
-
-    # Append it to state
     return {"messages": [answer]}
-
-
 def save_interview(state: InterviewState):
     """Save interviews"""
-
-    # Get messages
     messages = state["messages"]
-
-    # Convert interview to a string
     interview = get_buffer_string(messages)
-
-    # Save to interviews key
     return {"interview": interview}
-
-
 def route_messages(state: InterviewState, name: str = "expert"):
     """Route between question and answer"""
-
-    # Get messages
     messages = state["messages"]
     max_num_turns = state.get("max_num_turns", 2)
-
-    # Check the number of expert answers
     num_responses = len(
         [m for m in messages if isinstance(m, AIMessage) and m.name == name]
     )
-
-    # End if expert has answered more than the max turns
     if num_responses >= max_num_turns:
         return "save_interview"
-
-    # This router is run after each question - answer pair
-    # Get the last question asked to check if it signals the end of discussion
     last_question = messages[-2]
-
     if "Thank you so much for your help" in last_question.content:
         return "save_interview"
     return "ask_question"
-
-
-
 def write_section(state: InterviewState):
     """Node to write a section"""
-
-    # Get state
     interview = state["interview"]
     context = state["context"]
     analyst = state["analyst"]
-
-    # Write section using either the gathered source docs from interview (context) or the interview itself (interview)
     system_message = section_writer_instructions.format(focus=analyst.description)
     section = llm.invoke(
         [SystemMessage(content=system_message)]
         + [HumanMessage(content=f"Use this source to write your section: {context}")]
     )
-
-    # Append it to state
     return {"sections": [section.content]}
-
-
-# Add nodes and edges
 interview_builder = StateGraph(InterviewState)
 interview_builder.add_node("ask_question", generate_question)
 interview_builder.add_node("search_web", search_web)
@@ -197,8 +120,6 @@ interview_builder.add_node("search_wikipedia", search_wikipedia)
 interview_builder.add_node("answer_question", generate_answer)
 interview_builder.add_node("save_interview", save_interview)
 interview_builder.add_node("write_section", write_section)
-
-# Flow
 interview_builder.add_edge(START, "ask_question")
 interview_builder.add_edge("ask_question", "search_web")
 interview_builder.add_edge("ask_question", "search_wikipedia")
@@ -209,18 +130,11 @@ interview_builder.add_conditional_edges(
 )
 interview_builder.add_edge("save_interview", "write_section")
 interview_builder.add_edge("write_section", END)
-
-
 def initiate_all_interviews(state: ResearchGraphState):
     """Conditional edge to initiate all interviews via Send() API or return to create_analysts"""
-
-    # Check if human feedback
     human_analyst_feedback = state.get("human_analyst_feedback", "approve")
     if human_analyst_feedback.lower() != "approve":
-        # Return to create_analysts
         return "create_analysts"
-
-    # Otherwise kick off interviews in parallel via Send() API
     else:
         topic = state["topic"]
         return [
@@ -239,14 +153,9 @@ def initiate_all_interviews(state: ResearchGraphState):
         ]
 def write_report(state: ResearchGraphState):
     """Node to write the final report body"""
-    # Full set of sections
     sections = state["sections"]
     topic = state["topic"]
-
-    # Concat all sections together
     formatted_str_sections = "\n\n".join([f"{section}" for section in sections])
-
-    # Summarize the sections into a final report
     system_message = report_writer_instructions.format(
         topic=topic, context=formatted_str_sections
     )
@@ -255,24 +164,11 @@ def write_report(state: ResearchGraphState):
         + [HumanMessage(content=f"Write a report based upon these memos.")]
     )
     return {"content": report.content}
-
-
-# Write the introduction or conclusion
-
-
-
 def write_introduction(state: ResearchGraphState):
     """Node to write the introduction"""
-
-    # Full set of sections
     sections = state["sections"]
     topic = state["topic"]
-
-    # Concat all sections together
     formatted_str_sections = "\n\n".join([f"{section}" for section in sections])
-
-    # Summarize the sections into a final report
-
     instructions = intro_conclusion_instructions.format(
         topic=topic, formatted_str_sections=formatted_str_sections
     )
@@ -280,20 +176,11 @@ def write_introduction(state: ResearchGraphState):
         [instructions] + [HumanMessage(content=f"Write the report introduction")]
     )
     return {"introduction": intro.content}
-
-
 def write_conclusion(state: ResearchGraphState):
     """Node to write the conclusion"""
-
-    # Full set of sections
     sections = state["sections"]
     topic = state["topic"]
-
-    # Concat all sections together
     formatted_str_sections = "\n\n".join([f"{section}" for section in sections])
-
-    # Summarize the sections into a final report
-
     instructions = intro_conclusion_instructions.format(
         topic=topic, formatted_str_sections=formatted_str_sections
     )
@@ -301,12 +188,8 @@ def write_conclusion(state: ResearchGraphState):
         [instructions] + [HumanMessage(content=f"Write the report conclusion")]
     )
     return {"conclusion": conclusion.content}
-
-
 def finalize_report(state: ResearchGraphState):
     """The is the "reduce" step where we gather all the sections, combine them, and reflect on them to write the intro/conclusion"""
-
-    # Save full final report
     content = state["content"]
     if content.startswith("## Insights"):
         content = content.strip("## Insights")
@@ -317,7 +200,6 @@ def finalize_report(state: ResearchGraphState):
             sources = None
     else:
         sources = None
-
     final_report = (
         state["introduction"]
         + "\n\n---\n\n"
@@ -328,7 +210,6 @@ def finalize_report(state: ResearchGraphState):
     if sources is not None:
         final_report += "\n\n## Sources\n" + sources
     return {"final_report": final_report}
-
 builder = StateGraph(ResearchGraphState)
 builder.add_node("create_analysts", create_analysts)
 builder.add_node("human_feedback", human_feedback)

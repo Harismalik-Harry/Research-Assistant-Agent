@@ -1,0 +1,19 @@
+# Core agent dependencies
+langchain
+langgraph
+langchain-core
+langchain-community
+langchain-google-genai
+pydantic
+typing-extensions
+tavily-python
+wikipedia
+
+# Backend / API
+fastapi
+uvicorn[standard]
+sse-starlette
+python-dotenv
+
+# Database
+sqlalchemy

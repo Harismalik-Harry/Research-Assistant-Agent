@@ -11,17 +11,12 @@ class Analyst(BaseModel):
     description: str = Field(
         description="Description of the analyst focus, concerns, and motives.",
     )
-
     @property
     def persona(self) -> str:
         return f"Name: {self.name}\nRole: {self.role}\nAffiliation: {self.affiliation}\nDescription: {self.description}\n"
-
-
 class Perspectives(BaseModel):
     analysts: List[Analyst] = Field(
         description="Comprehensive list of analysts with their roles and affiliations.",
     )
-
-
 class SearchQuery(BaseModel):
     search_query: str = Field(None, description="Search query for retrieval.")
